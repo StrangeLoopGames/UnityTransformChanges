@@ -1,13 +1,13 @@
 {
-  "name": "com.strangeloopgames.runtimegraphicsinfo",
-  "displayName": "RuntimeGraphicsInfo",
-  "version": "0.1.5",
-  "unity": "2019.2",
-  "unityRelease": "0f1",
+  "name": "com.strangeloopgames.unitytransformchanges",
+  "displayName": "Unity Transform Changes",
+  "version": "0.1.0",
+  "unity": "2021.3",
+  "unityRelease": "9f1",
   "dependencies": {
   },
-  "description": "RuntimeGraphicsInfo",
+  "description": "Helps to track all transform changes in Unity",
   "keywords": [
-    "RuntimeGraphicsInfo"
+    "UnityTransformChanges"
   ]
 }
