@@ -11,6 +11,12 @@ namespace UnityTransformChanges
         
         public static event Action<int> TransformChanged;
     
+#if UNITY_2021_3_9 && UNITY_64 && (UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN)
+        public static bool IsTrackingSupported => true;
+#else
+        public static bool IsTrackingSupported => false;
+#endif
+    
         public static bool TrackTransformChanges { set => SetTransformChangeCallbackEnabled(value); }
 
         public static Transform GetTransformByID(int transformID) => (Transform) UnityInternalsBridge.FindObjectFromInstanceID(transformID);
