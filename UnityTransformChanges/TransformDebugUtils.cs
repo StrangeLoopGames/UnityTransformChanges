@@ -8,8 +8,10 @@ namespace UnityTransformChanges
     public static class TransformDebugUtils
     {
         const string DllName = "libUnityTransformChanges.dll";
+
+        public delegate void TransformChangeDelegate(int transformID, long hierarchyID, ref bool bypass);
         
-        public static event Action<int> TransformChanged;
+        public static event TransformChangeDelegate TransformChange;
     
 #if UNITY_2021_3_9 && UNITY_64 && (UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN)
         public static bool IsTrackingSupported => true;
@@ -21,28 +23,30 @@ namespace UnityTransformChanges
 
         public static Transform GetTransformByID(int transformID) => (Transform) UnityInternalsBridge.FindObjectFromInstanceID(transformID);
 
-        static readonly OnTransformChangeDelegate OnTransformChangeCallback = OnTransformChange;
+        static readonly NativeTransformChangeDelegate NativeTransformChangeCallback = OnTransformChange;
     
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        delegate void OnTransformChangeDelegate(IntPtr data);
+        delegate bool NativeTransformChangeDelegate(IntPtr data);
     
         [DllImport(DllName)]
-        static extern void SetTransformChangeCallback(OnTransformChangeDelegate callback);
+        static extern void SetTransformChangeCallback(NativeTransformChangeDelegate callback);
     
-        [AOT.MonoPInvokeCallback(typeof(Action<IntPtr>))]
-        static unsafe void OnTransformChange(IntPtr dataPtr)
+        [AOT.MonoPInvokeCallback(typeof(NativeTransformChangeDelegate))]
+        static unsafe bool OnTransformChange(IntPtr dataPtr)
         {
+            var bypass = true;
             var data = (TransformChangedCallbackData*) dataPtr.ToPointer();
             var transform = data->transform;
-            if (transform != null)
-                TransformChanged?.Invoke(transform->InstanceID);
+            if (transform != null) 
+                TransformChange?.Invoke(transform->InstanceID, transform->Hierarchy->ID, ref bypass);
+            return bypass;
         }
     
         static void SetTransformChangeCallbackEnabled(bool isEnabled)
         {
             try
             {
-                SetTransformChangeCallback(isEnabled ? OnTransformChangeCallback : null);
+                SetTransformChangeCallback(isEnabled ? NativeTransformChangeCallback : null);
             }
             catch (DllNotFoundException)
             {
@@ -72,7 +76,7 @@ namespace UnityTransformChanges
 #if UNITY_EDITOR
             [FieldOffset(0x78)] public NativeTransformHierarchy* Hierarchy;
 #else
-        [FieldOffset(0x50)] public NativeTransformHierarchy* Hierarchy;
+            [FieldOffset(0x50)] public NativeTransformHierarchy* Hierarchy;
 #endif
         }
     

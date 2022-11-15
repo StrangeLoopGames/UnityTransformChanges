@@ -30,7 +30,7 @@ public:
 };
 
 void Transform_set_Position_Intercept(void* transform, Vector3* position);
-void (*onTransformChangeCallback)(TransformChangedCallbackData* data) = nullptr;
+bool (*onTransformChangeCallback)(TransformChangedCallbackData* data) = nullptr;
 
 void* SearchByPattern(void* address, uint64_t pattern, uint64_t mask, uint32_t maxDistance)
 {
@@ -202,11 +202,17 @@ __declspec(naked) void FunctionName##Interceptor() \
         "movq        %%rdx, 0x28(%%rsp)\n\r" \
         "lea         %1, %%rax\n\r" \
         "call        *%%rax\n\r" \
+        "test        %%rax, %%rax\n\r" \
+        "jz          1f\n\r" \
         "mov         0x20(%%rsp), %%rcx\n\r" \
         "mov         0x28(%%rsp), %%rdx\n\r" \
         "addq        $0x20, %%rsp\n\r" \
         "movq        %0, %%rax\n\r" \
-        "jmp         *%%rax"::"m"(FunctionName##_return),"m"(FunctionName##_Intercept)); \
+        "jmp         *%%rax\n\r" \
+        "1:\n\r" \
+        "addq        $0x40, %%rsp\n\r" \
+        "pop         %%rbx\n\r" \
+        "ret\n\r"::"m"(FunctionName##_return),"m"(FunctionName##_Intercept)); \
 }
 
 #define INTERCEPTOR_PUSH_RDI_SUB_RSP_30(FunctionName) \
@@ -219,11 +225,17 @@ __declspec(naked) void FunctionName##Interceptor() \
         "movq        %%rdx, 0x28(%%rsp)\n\r" \
         "lea         %1, %%rax\n\r" \
         "call        *%%rax\n\r" \
+        "test        %%rax, %%rax\n\r" \
+        "jz          1f\n\r" \
         "mov         0x20(%%rsp), %%rcx\n\r" \
         "mov         0x28(%%rsp), %%rdx\n\r" \
         "addq        $0x20, %%rsp\n\r" \
         "movq        %0, %%rax\n\r" \
-        "jmp         *%%rax"::"m"(FunctionName##_return),"m"(FunctionName##_Intercept)); \
+        "jmp         *%%rax\n\r" \
+        "1:\n\r" \
+        "addq        $0x50, %%rsp\n\r" \
+        "pop         %%rdi\n\r" \
+        "ret\n\r"::"m"(FunctionName##_return),"m"(FunctionName##_Intercept)); \
 }
 
 INTERCEPTOR_MOV_RBX_RSP_8(Transform_set_Position)
@@ -242,34 +254,34 @@ bool IsTransformForHierarchy(void* transform, void* transformHierarchy, size_t o
     return SameAddressSpace((uint64_t) transform, (uint64_t)transformHierarchy) && *(void**)((uint64_t)transform + offset) == transformHierarchy;
 }
 
-void TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept(void* transformQueue, void* transformHierarchy)
+bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept(void* transformQueue, void* transformHierarchy)
 {
     register void* _rbx asm("%rbx");
     register void* _rdi asm("%rdi");
     if (onTransformChangeCallback == nullptr)
-        return;
+        return true;
 
     TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
     if (IsTransformForHierarchy(_rbx, transformHierarchy, 0x50))
         data.transform = _rbx;
     else if (IsTransformForHierarchy(_rdi, transformHierarchy, 0x50))
         data.transform = _rdi;
-    onTransformChangeCallback(&data);
+    return onTransformChangeCallback(&data);
 }
 
-void TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(void* transformQueue, void* transformHierarchy)
+bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(void* transformQueue, void* transformHierarchy)
 {
     register void* _rbx asm("%rbx");
     register void* _rdi asm("%rdi");
     if (onTransformChangeCallback == nullptr)
-        return;
+        return true;
 
     TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
     if (IsTransformForHierarchy(_rbx, transformHierarchy, 0x78))
         data.transform = _rbx;
     else if (IsTransformForHierarchy(_rdi, transformHierarchy, 0x78))
         data.transform = _rdi;
-    onTransformChangeCallback(&data);
+    return onTransformChangeCallback(&data);
 }
 
 INTERCEPTOR_PUSH_RBX_SUB_RSP_20(TransformChangeDispatch_QueueTransformChangeIfHasChanged)
@@ -431,7 +443,7 @@ void Transform_set_Position_Intercept(void* transform, Vector3* position)
     //RollbackPatches();
 }
 
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API SetTransformChangeCallback(void (*onTransformChange)(TransformChangedCallbackData* transform))
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API SetTransformChangeCallback(bool (*onTransformChange)(TransformChangedCallbackData* transform))
 {
     if (::onTransformChangeCallback != nullptr)
         RollbackPatches();
