@@ -249,39 +249,43 @@ inline bool SameAddressSpace(uint64_t x, uint64_t y)
     return (x & 0xfffffff000000000) == (y & 0xfffffff000000000);
 }
 
-bool IsTransformForHierarchy(void* transform, void* transformHierarchy, size_t offset)
+void* GetTransformForHierarchy(void* transformHierarchy, size_t offset...)
 {
-    return SameAddressSpace((uint64_t) transform, (uint64_t)transformHierarchy) && *(void**)((uint64_t)transform + offset) == transformHierarchy;
+    va_list args;
+    va_start(args, offset);
+    void* transform;
+    do
+    {
+        transform = va_arg(args, void*);
+    } while (!(transform != nullptr && transform == nullptr || (SameAddressSpace((uint64_t) transform, (uint64_t)transformHierarchy) && *(void**)((uint64_t)transform + offset) == transformHierarchy)));
+    va_end(args);
+    return transform;
+}
+
+bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(void* transformQueue, void* transformHierarchy, size_t hierarchyFieldOffset)
+{
+    register void* _rbx asm("%rbx");
+    register void* _rdi asm("%rdi");
+    register void* _r12 asm("%r12");
+    if (onTransformChangeCallback == nullptr)
+        return true;
+
+    TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
+    data.transform = GetTransformForHierarchy(transformHierarchy, hierarchyFieldOffset, _rbx, _rdi, _r12, nullptr);
+
+    auto bypass = onTransformChangeCallback(&data);
+    DebugBreakIfAttached();
+    return bypass;
 }
 
 bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept(void* transformQueue, void* transformHierarchy)
 {
-    register void* _rbx asm("%rbx");
-    register void* _rdi asm("%rdi");
-    if (onTransformChangeCallback == nullptr)
-        return true;
-
-    TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
-    if (IsTransformForHierarchy(_rbx, transformHierarchy, 0x50))
-        data.transform = _rbx;
-    else if (IsTransformForHierarchy(_rdi, transformHierarchy, 0x50))
-        data.transform = _rdi;
-    return onTransformChangeCallback(&data);
+    return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x50);
 }
 
 bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(void* transformQueue, void* transformHierarchy)
 {
-    register void* _rbx asm("%rbx");
-    register void* _rdi asm("%rdi");
-    if (onTransformChangeCallback == nullptr)
-        return true;
-
-    TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
-    if (IsTransformForHierarchy(_rbx, transformHierarchy, 0x78))
-        data.transform = _rbx;
-    else if (IsTransformForHierarchy(_rdi, transformHierarchy, 0x78))
-        data.transform = _rdi;
-    return onTransformChangeCallback(&data);
+    return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x78);
 }
 
 INTERCEPTOR_PUSH_RBX_SUB_RSP_20(TransformChangeDispatch_QueueTransformChangeIfHasChanged)

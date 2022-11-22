@@ -9,39 +9,42 @@ namespace UnityTransformChanges
     {
         const string DllName = "libUnityTransformChanges.dll";
 
-        public delegate void TransformChangeDelegate(int transformID, long hierarchyID, ref bool bypass);
-        
+        public delegate void TransformChangeDelegate(NativeTransform transform, NativeTransformHierarchy hierarchyID, ref bool bypass);
+
         public static event TransformChangeDelegate TransformChange;
-    
+
 #if UNITY_2021_3_9 && UNITY_64 && (UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN)
         public static bool IsTrackingSupported => true;
 #else
         public static bool IsTrackingSupported => false;
 #endif
-    
-        public static bool TrackTransformChanges { set => SetTransformChangeCallbackEnabled(value); }
 
-        public static Transform GetTransformByID(int transformID) => (Transform) UnityInternalsBridge.FindObjectFromInstanceID(transformID);
+        public static bool TrackTransformChanges
+        {
+            set => SetTransformChangeCallbackEnabled(value);
+        }
+
+        public static Transform GetTransformByID(int transformID) => (Transform)UnityInternalsBridge.FindObjectFromInstanceID(transformID);
 
         static readonly NativeTransformChangeDelegate NativeTransformChangeCallback = OnTransformChange;
-    
+
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate bool NativeTransformChangeDelegate(IntPtr data);
-    
+
         [DllImport(DllName)]
         static extern void SetTransformChangeCallback(NativeTransformChangeDelegate callback);
-    
+
         [AOT.MonoPInvokeCallback(typeof(NativeTransformChangeDelegate))]
         static unsafe bool OnTransformChange(IntPtr dataPtr)
         {
             var bypass = true;
-            var data = (TransformChangedCallbackData*) dataPtr.ToPointer();
+            var data = (TransformChangedCallbackData*)dataPtr.ToPointer();
             var transform = data->transform;
-            if (transform != null) 
-                TransformChange?.Invoke(transform->InstanceID, transform->Hierarchy->ID, ref bypass);
+            var hierarchy = data->hierarchy;
+            TransformChange?.Invoke(transform, hierarchy, ref bypass);
             return bypass;
         }
-    
+
         static void SetTransformChangeCallbackEnabled(bool isEnabled)
         {
             try
@@ -53,37 +56,20 @@ namespace UnityTransformChanges
                 Debug.LogError($"Package UnityTransformChanges not installed properly. Missing {DllName}");
             }
         }
-    
+
         enum TransformChangeType : uint
         {
             TransformChangeDispatch = 0,
             Position = 1
-        };
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         unsafe readonly struct TransformChangedCallbackData
         {
-            public readonly NativeTransform* transform;
-            public readonly NativeTransformHierarchy* hierarchy;
+            public readonly NativeTransform transform;
+            public readonly NativeTransformHierarchy hierarchy;
             public readonly void* extra;
             public readonly TransformChangeType type;
-        };
-    
-        [StructLayout(LayoutKind.Explicit)]
-        unsafe struct NativeTransform
-        {
-            [FieldOffset(0x08)] public int InstanceID;
-#if UNITY_EDITOR
-            [FieldOffset(0x78)] public NativeTransformHierarchy* Hierarchy;
-#else
-            [FieldOffset(0x50)] public NativeTransformHierarchy* Hierarchy;
-#endif
-        }
-    
-        [StructLayout(LayoutKind.Explicit)]
-        struct NativeTransformHierarchy
-        {
-            [FieldOffset(0x40)] public long ID;
         }
     }
 }
