@@ -44,19 +44,71 @@ void* SearchByPattern(void* address, uint64_t pattern, uint64_t mask, uint32_t m
     return nullptr;
 }
 
+struct MemoryWriter
+{
+    virtual size_t GetDataSize() const = 0;
+
+    virtual void WriteTo(uint8_t* dst) const = 0;
+
+    void WriteProtectedTo(uint8_t* dst) const
+    {
+        auto dataSize = GetDataSize();
+        DWORD oldProtect;
+        VirtualProtect(dst, dataSize, PAGE_EXECUTE_READWRITE, &oldProtect);
+        this->WriteTo(dst);
+        VirtualProtect(dst, dataSize, oldProtect, &oldProtect);
+    }
+};
+
+struct FarJumpWriter : MemoryWriter
+{
+public:
+    static const int OpCodesLength = 12;
+
+    explicit FarJumpWriter(const void* targetAddress) : TargetAddress(targetAddress) { }
+
+    const void* TargetAddress;
+
+    inline size_t GetDataSize() const override
+    {
+        return OpCodesLength;
+    }
+
+    void WriteTo(uint8_t* dst) const override
+    {
+        // movabs rax, TargetAddress
+        dst[0] = 0x48;
+        dst[1] = 0xb8;
+        *(const void**)(dst + 2) = TargetAddress;
+        // jmp rax
+        dst[10] = 0xff;
+        dst[11] = 0xe0;
+    }
+};
+
 void DebugBreakIfAttached()
 {
     if (IsDebuggerPresent())
         DebugBreak();
 }
 
-struct PatchSequence
+struct PatchSequence : MemoryWriter
 {
 public:
     const uint8_t* bytesToReplace;
     const size_t bytesCount;
 
     explicit PatchSequence(const uint8_t* bytesToReplace, size_t bytesCount) : bytesToReplace(bytesToReplace), bytesCount(bytesCount) { }
+
+    size_t GetDataSize() const override
+    {
+        return bytesCount;
+    }
+
+    void WriteTo(uint8_t *dst) const override
+    {
+        memcpy(dst, bytesToReplace, bytesCount);
+    }
 };
 
 const uint8_t MovRbxRsp8Bytes[5] = { 0x48, 0x89, 0x5c, 0x24, 0x8  };
@@ -68,12 +120,28 @@ PatchSequence PushRbxSubRsp20(PushRbxSubRsp20Bytes, sizeof(PushRbxSubRsp20Bytes)
 const uint8_t PushRdiSubRsp30Bytes[6] = { 0x40, 0x57, 0x48, 0x83, 0xec, 0x30 };
 PatchSequence PushRdiSubRsp30(PushRdiSubRsp30Bytes, sizeof(PushRdiSubRsp30Bytes));
 
+struct HookInfo
+{
+public:
+    const void* Hook;
+    uint8_t ResumeOpCodes[32];
+    PatchSequence PatchSequence;
+
+    HookInfo(const void* hook, const struct PatchSequence& patchSequence) : Hook(hook), PatchSequence(patchSequence), ResumeOpCodes()
+    {
+        patchSequence.WriteTo(ResumeOpCodes);
+    }
+
+    void SetReturnAddress(void* returnAddress)
+    {
+        FarJumpWriter(returnAddress).WriteTo(ResumeOpCodes + PatchSequence.bytesCount);
+    }
+};
+
 struct Patch
 {
     const uint64_t rva;
-    const void* interceptor;
     void** returnAddress;
-    PatchSequence patchSequence;
     void* farJumpAddress;
 
     uint64_t GetPatchAddress(void* rvaBase) const
@@ -82,7 +150,9 @@ struct Patch
     }
 
 public:
-    Patch(const uint64_t rva, PatchSequence patchSequence, const void *interceptor, void** returnAddress) : rva(rva), patchSequence(patchSequence), interceptor(interceptor), returnAddress(returnAddress), farJumpAddress(nullptr) {
+    HookInfo Hook;
+
+    Patch(const uint64_t rva, const PatchSequence& patchSequence, const void *interceptor, const void* hook, void** returnAddress) : rva(rva), Hook(hook, patchSequence), returnAddress(returnAddress), farJumpAddress(nullptr) {
     }
 
     /*
@@ -111,17 +181,11 @@ public:
 
     void* FarJumpPatch(void* patchAddress) const
     {
-        static const size_t farJumpPatchSize = 12;
-
         // far_jump: movabs rax, interceptor
         // jmp rax
-        DWORD oldProtect;
-        void* gap = FindGap((void*)patchAddress, farJumpPatchSize);
-        VirtualProtect((void*) gap, farJumpPatchSize, PAGE_EXECUTE_READWRITE, &oldProtect);
-        uint8_t farJumpPatch[farJumpPatchSize] = { 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xe0 };
-        *(uint64_t*)(farJumpPatch + 2) = (uint64_t)interceptor;
-        memcpy((void*)gap, farJumpPatch, farJumpPatchSize);
-        VirtualProtect((void*) gap, farJumpPatchSize, oldProtect, &oldProtect);
+        const FarJumpWriter &writer = FarJumpWriter(Hook.Hook);
+        void* gap = FindGap((void*)patchAddress, writer.GetDataSize());
+        writer.WriteProtectedTo((uint8_t*)gap);
         return gap;
     }
 
@@ -129,7 +193,7 @@ public:
     {
         // DebugBreakIfAttached();
         auto address = GetPatchAddress(rvaBase);
-        auto cmp = memcmp((void*)address, patchSequence.bytesToReplace, patchSequence.bytesCount);
+        auto cmp = memcmp((void*)address, Hook.PatchSequence.bytesToReplace, Hook.PatchSequence.bytesCount);
         if (cmp != 0)
         {
             MessageBox(nullptr, "Failed to apply patch, because bytes to replace doesn't match", "Error", MB_OK);
@@ -141,9 +205,9 @@ public:
 
         // jmp far_jump
         DWORD oldProtect;
-        VirtualProtect((void*) address, patchSequence.bytesCount, PAGE_EXECUTE_READWRITE, &oldProtect);
-        uint8_t patch[patchSequence.bytesCount];
-        memset(patch, 0xcc, patchSequence.bytesCount);
+        VirtualProtect((void*) address, Hook.PatchSequence.bytesCount, PAGE_EXECUTE_READWRITE, &oldProtect);
+        uint8_t patch[Hook.PatchSequence.bytesCount];
+        memset(patch, 0xcc, Hook.PatchSequence.bytesCount);
         auto offset = (int64_t)((uint64_t)farJumpAddress - address - 2); // jmp byte offset has 2 bytes size
         if (offset >= -128 && offset <= 127)
         {
@@ -155,20 +219,19 @@ public:
             patch[0] = 0xe9;
             *(uint32_t*)(patch + 1) = offset - 3;                       // extra 3 bytes for 5 byte size jmp with 32-bit offset
         }
-        memcpy((void*)address, patch, patchSequence.bytesCount);
-        VirtualProtect((void*) address, patchSequence.bytesCount, oldProtect, &oldProtect);
+        memcpy((void*)address, patch, Hook.PatchSequence.bytesCount);
+        VirtualProtect((void*) address, Hook.PatchSequence.bytesCount, oldProtect, &oldProtect);
 
-        *returnAddress = (void*)(address + patchSequence.bytesCount);
+        void *resumeAt = (void *) (address + Hook.PatchSequence.bytesCount);
+        *returnAddress = resumeAt;
+        Hook.SetReturnAddress(resumeAt);
     }
 
     void Rollback(void* rvaBase)
     {
         auto address = GetPatchAddress(rvaBase);
 
-        DWORD oldProtect;
-        VirtualProtect((void*) address, patchSequence.bytesCount, PAGE_EXECUTE_READWRITE, &oldProtect);
-        memcpy((void*) address, patchSequence.bytesToReplace, patchSequence.bytesCount);
-        VirtualProtect((void*) address, patchSequence.bytesCount, oldProtect, &oldProtect);
+        Hook.PatchSequence.WriteProtectedTo((uint8_t*)address);
     }
 };
 
@@ -219,45 +282,53 @@ __declspec(naked) void FunctionName##Interceptor() \
 void* FunctionName##_return; \
 __declspec(naked) void FunctionName##Interceptor() \
 { \
-    asm("push        %%rdi\n\r" \
-        "subq        $0x50, %%rsp\n\r" \
+    asm("movq        %1, %%rax\n\r" \
+        "subq        $0x48, %%rsp\n\r" \
         "movq        %%rcx, 0x20(%%rsp)\n\r" \
         "movq        %%rdx, 0x28(%%rsp)\n\r" \
-        "lea         %1, %%rax\n\r" \
+        "movq        %%r8,  0x30(%%rsp)\n\r" \
+        "movq        %%r9,  0x38(%%rsp)\n\r" \
         "call        *%%rax\n\r" \
-        "test        %%rax, %%rax\n\r" \
-        "jz          1f\n\r" \
         "mov         0x20(%%rsp), %%rcx\n\r" \
         "mov         0x28(%%rsp), %%rdx\n\r" \
-        "addq        $0x20, %%rsp\n\r" \
+        "mov         0x30(%%rsp), %%r8\n\r" \
+        "mov         0x38(%%rsp), %%r9\n\r" \
+        "addq        $0x48, %%rsp\n\r" \
+        "test        %%rax, %%rax\n\r" \
+        "jz          1f\n\r" \
+        "push        %%rdi\n\r" \
+        "subq        $0x30, %%rsp\n\r"\
         "movq        %0, %%rax\n\r" \
         "jmp         *%%rax\n\r" \
         "1:\n\r" \
-        "addq        $0x50, %%rsp\n\r" \
-        "pop         %%rdi\n\r" \
-        "ret\n\r"::"m"(FunctionName##_return),"m"(FunctionName##_Intercept)); \
+        "ret\n\r"::"m"(FunctionName##_return),"m"(FunctionName##_hook->Hook)); \
 }
 
 INTERCEPTOR_MOV_RBX_RSP_8(Transform_set_Position)
 
-Patch playerPatch(0xb84b00, MovRbxRsp8, (void *) Transform_set_PositionInterceptor, &Transform_set_Position_return);
-Patch il2cppPatch(0xB89B80, MovRbxRsp8, (void *) Transform_set_PositionInterceptor, &Transform_set_Position_return);
-Patch editorPatch(0xd40300, MovRbxRsp8, (void *) Transform_set_PositionInterceptor, &Transform_set_Position_return);
+Patch playerPatch(0xb84b00, MovRbxRsp8, (void *) Transform_set_PositionInterceptor, (void *) Transform_set_Position_Intercept, &Transform_set_Position_return);
+Patch il2cppPatch(0xB89B80, MovRbxRsp8, (void *) Transform_set_PositionInterceptor, (void *) Transform_set_Position_Intercept, &Transform_set_Position_return);
+Patch editorPatch(0xd40300, MovRbxRsp8, (void *) Transform_set_PositionInterceptor, (void *) Transform_set_Position_Intercept, &Transform_set_Position_return);
 
 inline bool SameAddressSpace(uint64_t x, uint64_t y)
 {
     return (x & 0xfffffff000000000) == (y & 0xfffffff000000000);
 }
 
-void* GetTransformForHierarchy(void* transformHierarchy, size_t offset...)
+void* GetTransformForHierarchy(void* transformHierarchy, size_t offset, size_t candidatesCount...)
 {
     va_list args;
-    va_start(args, offset);
+    va_start(args, candidatesCount);
     void* transform;
-    do
+    for (auto i = 0; i < candidatesCount; ++candidatesCount)
     {
-        transform = va_arg(args, void*);
-    } while (!(transform != nullptr && transform == nullptr || (SameAddressSpace((uint64_t) transform, (uint64_t)transformHierarchy) && *(void**)((uint64_t)transform + offset) == transformHierarchy)));
+        void* candidate = va_arg(args, void*);
+        if (SameAddressSpace((uint64_t) candidate, (uint64_t)transformHierarchy) && *(void**)((uint64_t)candidate + offset) == transformHierarchy)
+        {
+            transform = candidate;
+            break;
+        }
+    }
     va_end(args);
     return transform;
 }
@@ -271,7 +342,7 @@ bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal
         return true;
 
     TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
-    data.transform = GetTransformForHierarchy(transformHierarchy, hierarchyFieldOffset, _rbx, _rdi, _r12, nullptr);
+    data.transform = GetTransformForHierarchy(transformHierarchy, hierarchyFieldOffset, 3, _rbx, _rdi, _r12);
 
     auto bypass = onTransformChangeCallback(&data);
     DebugBreakIfAttached();
@@ -288,12 +359,15 @@ bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(v
     return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x78);
 }
 
+extern HookInfo* TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_hook;
+
 INTERCEPTOR_PUSH_RBX_SUB_RSP_20(TransformChangeDispatch_QueueTransformChangeIfHasChanged)
 INTERCEPTOR_PUSH_RDI_SUB_RSP_30(TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor)
 
-Patch il2cppDispatchPatch(0xB80190, PushRbxSubRsp20, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChangedInterceptor, &TransformChangeDispatch_QueueTransformChangeIfHasChanged_return);
-Patch monoDispatchPatch(0xB7B110, PushRbxSubRsp20, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChangedInterceptor, &TransformChangeDispatch_QueueTransformChangeIfHasChanged_return);
-Patch editorDispatchPatch(0xD3B960, PushRdiSubRsp30, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_EditorInterceptor, &TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_return);
+Patch il2cppDispatchPatch(0xB80190, PushRbxSubRsp20, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChangedInterceptor, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept, &TransformChangeDispatch_QueueTransformChangeIfHasChanged_return);
+Patch monoDispatchPatch(0xB7B110, PushRbxSubRsp20, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChangedInterceptor, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept, &TransformChangeDispatch_QueueTransformChangeIfHasChanged_return);
+Patch editorDispatchPatch(0xD3B960, PushRdiSubRsp30, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_EditorInterceptor, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept, &TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_return);
+HookInfo* TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_hook = &editorDispatchPatch.Hook;
 
 Patch* activePatch;
 
