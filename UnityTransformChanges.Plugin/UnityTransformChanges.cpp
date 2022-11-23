@@ -5,8 +5,39 @@
 #include "UnityTransformChanges.h"
 
 #include <utility>
+#include <vector>
 
 #include "IUnityInterface.h"
+
+enum UnityRuntimeType
+{
+    Editor,
+    Mono,
+    IL2CPP
+};
+
+struct UnityRuntime
+{
+public:
+    void* RvaBase;
+    UnityRuntimeType Type;
+
+    UnityRuntime()
+    {
+        RvaBase = GetModuleHandle("UnityPlayer.dll");
+        if (RvaBase != nullptr)
+        {
+            Type = GetModuleHandle("mono-2.0-bdwgc.dll") != nullptr ? UnityRuntimeType::Mono : UnityRuntimeType::IL2CPP;
+        }
+        else
+        {
+            RvaBase = GetModuleHandle("Unity.exe");
+            Type = UnityRuntimeType::Editor;
+        }
+    }
+};
+
+UnityRuntime CurrentUnityRuntime;
 
 struct Vector3
 {
@@ -117,30 +148,28 @@ void DebugBreakIfAttached()
 struct PatchSequence : MemoryWriter
 {
 public:
-    const uint8_t* bytesToReplace;
-    const size_t bytesCount;
+    const std::vector<uint8_t> bytesToReplace;
 
-    explicit PatchSequence(const uint8_t* bytesToReplace, size_t bytesCount) : bytesToReplace(bytesToReplace), bytesCount(bytesCount) { }
+    PatchSequence(std::initializer_list<uint8_t> bytesToReplace) : bytesToReplace(std::vector<uint8_t>(bytesToReplace)) { }
 
     size_t GetDataSize() const override
     {
-        return bytesCount;
+        return bytesToReplace.size();
     }
 
     void WriteTo(uint8_t *dst) const override
     {
-        memcpy(dst, bytesToReplace, bytesCount);
+        std::copy(bytesToReplace.begin(), bytesToReplace.end(), dst);
     }
 };
 
-const uint8_t MovRbxRsp8Bytes[5] = { 0x48, 0x89, 0x5c, 0x24, 0x8  };
-PatchSequence MovRbxRsp8(MovRbxRsp8Bytes, sizeof(MovRbxRsp8Bytes));
+PatchSequence MovRbxRsp8({ 0x48, 0x89, 0x5c, 0x24, 0x8  });
 
-const uint8_t PushRbxSubRsp20Bytes[6] = { 0x40, 0x53, 0x48, 0x83, 0xec, 0x20 };
-PatchSequence PushRbxSubRsp20(PushRbxSubRsp20Bytes, sizeof(PushRbxSubRsp20Bytes));
+PatchSequence PushRbxSubRsp20({ 0x40, 0x53, 0x48, 0x83, 0xec, 0x20 });
 
-const uint8_t PushRdiSubRsp30Bytes[6] = { 0x40, 0x57, 0x48, 0x83, 0xec, 0x30 };
-PatchSequence PushRdiSubRsp30(PushRdiSubRsp30Bytes, sizeof(PushRdiSubRsp30Bytes));
+PatchSequence PushRdiSubRsp30({ 0x40, 0x57, 0x48, 0x83, 0xec, 0x30 });
+
+PatchSequence MovR8Rsp18( { 0x4c, 0x89, 0x44, 0x24, 0x18 });
 
 struct HookInfo
 {
@@ -184,10 +213,10 @@ public:
     {
         FarJumpWriter farJumpWriter(returnAddress);
         patchSequence.WriteTo(ResumeOpCodes);
-        farJumpWriter.WriteTo(ResumeOpCodes + patchSequence.bytesCount);
+        farJumpWriter.WriteTo(ResumeOpCodes + patchSequence.GetDataSize());
         // Mark this code as executable, it located in data section and need explicit permissions
         DWORD oldProtect;
-        VirtualProtect(ResumeOpCodes, patchSequence.bytesCount + farJumpWriter.GetDataSize(), PAGE_EXECUTE_READWRITE, &oldProtect);
+        VirtualProtect(ResumeOpCodes, patchSequence.GetDataSize() + farJumpWriter.GetDataSize(), PAGE_EXECUTE_READWRITE, &oldProtect);
 
         uint8_t* dst = HookInvokeOpCodes;
         MovToRaxWriter((uint64_t)this).WriteTo(dst);
@@ -200,21 +229,45 @@ public:
     }
 };
 
+struct PatchTarget
+{
+    const uint64_t Rva;
+    PatchSequence PatchSequence;
+    const void* Hook;
+
+    PatchTarget(uint64_t rva, struct PatchSequence patchSequence, void* hook = nullptr) : Rva(rva), PatchSequence(std::move(patchSequence)), Hook(hook) { }
+};
+
 struct Patch
 {
-    const uint64_t rva;
     void* farJumpAddress;
     HookInfo hookInfo;
-    PatchSequence patchSequence;
+    PatchTarget target;
 
-    uint64_t GetPatchAddress(void* rvaBase) const
+    uint64_t GetPatchAddress() const
     {
-        return (uint64_t)rvaBase + rva;
+        return (uint64_t)CurrentUnityRuntime.RvaBase + target.Rva;
+    }
+
+    inline static const PatchTarget& SelectTarget(const PatchTarget& editor, const PatchTarget& mono, const PatchTarget& il2cpp)
+    {
+        switch (CurrentUnityRuntime.Type) {
+
+            case Editor:
+                return editor;
+            case Mono:
+                return mono;
+            case IL2CPP:
+                return il2cpp;
+            default:
+                throw std::exception();
+        }
     }
 
 public:
-    Patch(const uint64_t rva, PatchSequence patchSequence, const void* hook) : rva(rva), patchSequence(std::move(patchSequence)), hookInfo(hook), farJumpAddress(nullptr) {
-    }
+    Patch(const PatchTarget& target, const void* defaultHook) : target(target), hookInfo(target.Hook != nullptr ? target.Hook : defaultHook), farJumpAddress(nullptr) { }
+
+    Patch(const PatchTarget& editor, const PatchTarget& mono, const PatchTarget& il2cpp, const void* defaultHook) : Patch(SelectTarget(editor, mono, il2cpp), defaultHook) { }
 
     /*
      * We use that fact what functions aligned for 0x10 and gaps filled with 0xcc (int 3) op codes.
@@ -240,15 +293,16 @@ public:
         return gapStart;
     }
 
-    void Apply(void* rvaBase)
+    bool Apply()
     {
         // DebugBreakIfAttached();
-        auto address = GetPatchAddress(rvaBase);
-        auto cmp = memcmp((void*)address, patchSequence.bytesToReplace, patchSequence.bytesCount);
+        auto address = GetPatchAddress();
+        const PatchSequence& patchSequence = target.PatchSequence;
+        auto cmp = memcmp((void*)address, patchSequence.bytesToReplace.data(), patchSequence.GetDataSize());
         if (cmp != 0)
         {
             MessageBox(nullptr, "Failed to apply patch, because bytes to replace doesn't match", "Error", MB_OK);
-            return;
+            return false;
         }
 
         if (farJumpAddress == nullptr)
@@ -256,9 +310,9 @@ public:
 
         // jmp far_jump
         DWORD oldProtect;
-        VirtualProtect((void*) address, patchSequence.bytesCount, PAGE_EXECUTE_READWRITE, &oldProtect);
-        uint8_t patch[patchSequence.bytesCount];
-        memset(patch, 0xcc, patchSequence.bytesCount);
+        VirtualProtect((void*) address, patchSequence.GetDataSize(), PAGE_EXECUTE_READWRITE, &oldProtect);
+        uint8_t patch[patchSequence.GetDataSize()];
+        memset(patch, 0xcc, patchSequence.GetDataSize());
         auto offset = (int64_t)((uint64_t)farJumpAddress - address - 2); // jmp byte offset has 2 bytes size
         if (offset >= -128 && offset <= 127)
         {
@@ -270,27 +324,27 @@ public:
             patch[0] = 0xe9;
             *(uint32_t*)(patch + 1) = offset - 3;                       // extra 3 bytes for 5 byte size jmp with 32-bit offset
         }
-        memcpy((void*)address, patch, patchSequence.bytesCount);
-        VirtualProtect((void*) address, patchSequence.bytesCount, oldProtect, &oldProtect);
+        memcpy((void*)address, patch, patchSequence.GetDataSize());
+        VirtualProtect((void*) address, patchSequence.GetDataSize(), oldProtect, &oldProtect);
 
-        void *resumeAt = (void *) (address + patchSequence.bytesCount);
+        void *resumeAt = (void *) (address + patchSequence.GetDataSize());
         hookInfo.Init(patchSequence, resumeAt);
 
         const FarJumpWriter &writer = FarJumpWriter(hookInfo.HookInvokeOpCodes);
         writer.WriteProtectedTo((uint8_t*)farJumpAddress);
+        return true;
     }
 
-    void Rollback(void* rvaBase)
+    void Rollback()
     {
-        auto address = GetPatchAddress(rvaBase);
-
-        patchSequence.WriteProtectedTo((uint8_t*)address);
+        auto address = GetPatchAddress();
+        target.PatchSequence.WriteProtectedTo((uint8_t*)address);
     }
 };
 
-Patch playerPatch(0xb84b00, MovRbxRsp8, (void *) Transform_set_Position_Intercept);
-Patch il2cppPatch(0xB89B80, MovRbxRsp8, (void *) Transform_set_Position_Intercept);
-Patch editorPatch(0xd40300, MovRbxRsp8, (void *) Transform_set_Position_Intercept);
+std::vector<Patch*> appliedPatches;
+
+Patch patchTransform_set_Position(PatchTarget(0xd40300, MovRbxRsp8), PatchTarget(0xb84b00, MovRbxRsp8), PatchTarget(0xB89B80, MovRbxRsp8), (void *) Transform_set_Position_Intercept);
 
 inline bool SameAddressSpace(uint64_t x, uint64_t y)
 {
@@ -341,9 +395,22 @@ bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(v
     return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x78);
 }
 
-Patch il2cppDispatchPatch(0xB80190, PushRbxSubRsp20, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept);
-Patch monoDispatchPatch(0xB7B110, PushRbxSubRsp20, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept);
-Patch editorDispatchPatch(0xD3B960, PushRdiSubRsp30, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept);
+bool TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook()
+{
+    return true;
+}
+
+Patch patchTransformChangeDispatch_QueueTransformChangeIfHasChanged(
+        PatchTarget(0xD3B960, PushRdiSubRsp30, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept),
+        PatchTarget(0xB7B110, PushRbxSubRsp20),
+        PatchTarget(0xB80190, PushRbxSubRsp20),
+        (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept);
+
+Patch patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal(
+        PatchTarget(0x00d37aa0, MovR8Rsp18),
+        PatchTarget(0x0, MovR8Rsp18),
+        PatchTarget(0x0, MovR8Rsp18),
+        (void *) TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook);
 
 Patch* activePatch;
 
@@ -354,33 +421,17 @@ uint64_t GetModuleRVABase(const char* dllName)
 
 void ApplyPatches()
 {
-    auto rvaBasePlayer = GetModuleRVABase("UnityPlayer.dll");
-    auto rvaBaseEditor = GetModuleRVABase("Unity.exe");
-    auto monoRuntime = GetModuleHandle("mono-2.0-bdwgc.dll") != nullptr;
-
-    if (rvaBasePlayer != 0)
-    {
-        activePatch = &(monoRuntime ? monoDispatchPatch : il2cppDispatchPatch);
-        activePatch->Apply(reinterpret_cast<void *>(rvaBasePlayer));
-    }
-    else if (rvaBaseEditor != 0)
-    {
-        activePatch = &editorDispatchPatch;
-        activePatch->Apply(reinterpret_cast<void *>(rvaBaseEditor));
-    }
-    else
-        MessageBox(nullptr, "Failed to patch Transform.set_Position, no UnityPlayer.dll", "Test", MB_OK);
+    if (patchTransformChangeDispatch_QueueTransformChangeIfHasChanged.Apply())
+        appliedPatches.push_back(&patchTransformChangeDispatch_QueueTransformChangeIfHasChanged);
+    if (patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal.Apply())
+        appliedPatches.push_back(&patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal);
 }
 
 void RollbackPatches()
 {
-    auto rvaBasePlayer = GetModuleRVABase("UnityPlayer.dll");
-    auto rvaBaseEditor = GetModuleRVABase("Unity.exe");
-
-    if (rvaBasePlayer != 0)
-        activePatch->Rollback(reinterpret_cast<void *>(rvaBasePlayer));
-    else if (rvaBaseEditor != 0)
-        activePatch->Rollback(reinterpret_cast<void *>(rvaBaseEditor));
+    for (auto patch : appliedPatches)
+        patch->Rollback();
+    appliedPatches.clear();
 }
 
 class MonoAssembly
