@@ -1,17 +1,21 @@
-﻿using System;
+﻿#nullable enable
+
+using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
 using UnityTransformChanges.InternalAPIEngineBridge;
 
 namespace UnityTransformChanges
 {
-    public static class TransformDebugUtils
+    using Unity.Profiling;
+
+    public static unsafe class TransformDebugUtils
     {
         const string DllName = "libUnityTransformChanges.dll";
 
         public delegate void TransformChangeDelegate(NativeTransform transform, NativeTransformHierarchy hierarchyID, ref bool bypass);
 
-        public static event TransformChangeDelegate TransformChange;
+        public static event TransformChangeDelegate? TransformChange;
 
 #if UNITY_2021_3_9 && UNITY_64 && (UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN)
         public static bool IsTrackingSupported => true;
@@ -27,15 +31,23 @@ namespace UnityTransformChanges
         public static Transform GetTransformByID(int transformID) => (Transform)UnityInternalsBridge.FindObjectFromInstanceID(transformID);
 
         static readonly NativeTransformChangeDelegate NativeTransformChangeCallback = OnTransformChange;
+        static readonly TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate GetAndClearChangedAsBatchedJobsCallback = OnGetAndClearChangedAsBatchedJobs;
+
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate bool NativeTransformChangeDelegate(IntPtr data);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        delegate bool TransformJobMethodDelegate(IntPtr job, int mayBeIndex, TransformAccessReadonly transform, void* unknown1, uint unknown2);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        delegate bool TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate(void* transformChangeDispatch, ulong arg0, TransformJobMethodDelegate jobMethod, TransformAccessReadonly* transforms, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor);
+
         [DllImport(DllName)]
-        static extern void SetTransformChangeCallback(NativeTransformChangeDelegate callback);
+        static extern void SetTransformChangeCallbacks(NativeTransformChangeDelegate? transformChangeCallback, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate? getAndClearChangedBatchedJobs);
 
         [AOT.MonoPInvokeCallback(typeof(NativeTransformChangeDelegate))]
-        static unsafe bool OnTransformChange(IntPtr dataPtr)
+        static bool OnTransformChange(IntPtr dataPtr)
         {
             var bypass = true;
             var data = (TransformChangedCallbackData*)dataPtr.ToPointer();
@@ -45,11 +57,21 @@ namespace UnityTransformChanges
             return bypass;
         }
 
+        [AOT.MonoPInvokeCallback(typeof(TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate))]
+        static bool OnGetAndClearChangedAsBatchedJobs(void* transformChangeDispatch, ulong mask, TransformJobMethodDelegate jobMethod, TransformAccessReadonly* transforms, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor)
+        {
+            var bypass = true;
+            return bypass;
+        }
+
         static void SetTransformChangeCallbackEnabled(bool isEnabled)
         {
             try
             {
-                SetTransformChangeCallback(isEnabled ? NativeTransformChangeCallback : null);
+                if (isEnabled)
+                    SetTransformChangeCallbacks(NativeTransformChangeCallback, GetAndClearChangedAsBatchedJobsCallback);
+                else
+                    SetTransformChangeCallbacks(null, null);
             }
             catch (DllNotFoundException)
             {
@@ -64,7 +86,7 @@ namespace UnityTransformChanges
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        unsafe readonly struct TransformChangedCallbackData
+        readonly struct TransformChangedCallbackData
         {
             public readonly NativeTransform transform;
             public readonly NativeTransformHierarchy hierarchy;

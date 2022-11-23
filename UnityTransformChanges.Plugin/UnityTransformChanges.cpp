@@ -63,7 +63,12 @@ public:
 };
 
 void Transform_set_Position_Intercept(void* transform, Vector3* position);
-bool (*onTransformChangeCallback)(TransformChangedCallbackData* data) = nullptr;
+
+typedef bool (*OnTransformChangeCallback)(TransformChangedCallbackData* data);
+typedef bool (*OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal)(void* transformChangeDispatch, uint64_t arg0, void (__cdecl*)(void* job, uint32_t mayBeIndex, void* transformAccessReadOnly, void* unknown1, uint32_t unknown2), void* transformAccesses, void* profilerMarker, char const* descriptor);
+
+OnTransformChangeCallback onTransformChangeCallback = nullptr;
+OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback = nullptr;
 
 void* SearchByPattern(void* address, uint64_t pattern, uint64_t mask, uint32_t maxDistance)
 {
@@ -179,20 +184,22 @@ struct HookInfo
             movq        %rax, 0x08(%rsp)
             addq        $0x08, %rax
             movq        %rax, 0x10(%rsp)
-            subq        $0x48, %rsp
-            movq        %rcx, 0x28(%rsp)
-            movq        %rdx, 0x30(%rsp)
-            movq        %r8,  0x38(%rsp)
-            movq        %r9,  0x40(%rsp)
-            movq        0x70(%rsp), %rax
+            subq        $0x58, %rsp
+            movq        %rcx, 0x38(%rsp) # save all volatile registers
+            movq        %rdx, 0x40(%rsp)
+            movq        %r8,  0x48(%rsp)
+            movq        %r9,  0x50(%rsp)
+            movq        0x80(%rsp), %rax # copy arg5
             movq        %rax, 0x20(%rsp)
-            movq        0x50(%rsp), %rax
-            call        *(%rax)
-            mov         0x28(%rsp), %rcx
-            mov         0x30(%rsp), %rdx
-            mov         0x38(%rsp), %r8
-            mov         0x40(%rsp), %r9
-            addq        $0x48, %rsp
+            movq        0x88(%rsp), %rax # copy arg6
+            movq        %rax, 0x28(%rsp)
+            movq        0x60(%rsp), %rax # get saved address of HookInfo
+            call        *(%rax)          # call the Hook
+            mov         0x38(%rsp), %rcx # restore all volatile registers
+            mov         0x40(%rsp), %rdx
+            mov         0x48(%rsp), %r8
+            mov         0x50(%rsp), %r9
+            addq        $0x58, %rsp
             test        %rax, %rax
             jz          1f
             jmp         *0x10(%rsp)
@@ -395,9 +402,11 @@ bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(v
     return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x78);
 }
 
-bool TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook()
+bool TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook(void* transformChangeDispatch, uint64_t arg0, void (__cdecl* jobMethod)(void* job, uint32_t mayBeIndex, void* transformAccessReadOnly, void* unknown1, uint32_t unknown2), void* transformAccesses, void* profilerMarker, char const* descriptor)
 {
-    return true;
+    if (::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback == nullptr)
+        return true;
+    return ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback(transformChangeDispatch, arg0, jobMethod, transformAccesses, profilerMarker, descriptor);
 }
 
 Patch patchTransformChangeDispatch_QueueTransformChangeIfHasChanged(
@@ -411,8 +420,6 @@ Patch patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal(
         PatchTarget(0x0, MovR8Rsp18),
         PatchTarget(0x0, MovR8Rsp18),
         (void *) TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook);
-
-Patch* activePatch;
 
 uint64_t GetModuleRVABase(const char* dllName)
 {
@@ -548,12 +555,12 @@ void Transform_set_Position_Intercept(void* transform, Vector3* position)
     //RollbackPatches();
 }
 
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API SetTransformChangeCallback(bool (*onTransformChange)(TransformChangedCallbackData* transform))
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API SetTransformChangeCallbacks(OnTransformChangeCallback onTransformChange, OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal onGetAndClearBatchesJob)
 {
-    if (::onTransformChangeCallback != nullptr)
-        RollbackPatches();
+    RollbackPatches();
     ::onTransformChangeCallback = onTransformChange;
-    if (::onTransformChangeCallback != nullptr)
+    ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback = onGetAndClearBatchesJob;
+    if (::onTransformChangeCallback != nullptr || ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback != nullptr)
         ApplyPatches();
 }
 
@@ -567,5 +574,5 @@ UnityPluginLoad(IUnityInterfaces * unityInterfaces)
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 UnityPluginUnload()
 {
-    SetTransformChangeCallback(nullptr);
+    SetTransformChangeCallbacks(nullptr, nullptr);
 }
