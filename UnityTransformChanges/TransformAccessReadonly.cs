@@ -7,5 +7,7 @@
     {
         public readonly NativeTransformHierarchy Hierarchy;
         public readonly int TransformIndex;
+
+        public int TransformInstanceID => this.Hierarchy.Transforms[this.TransformIndex].InstanceID;
     }
 }

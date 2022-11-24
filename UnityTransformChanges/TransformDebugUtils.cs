@@ -8,14 +8,21 @@ using UnityTransformChanges.InternalAPIEngineBridge;
 namespace UnityTransformChanges
 {
     using Unity.Profiling;
+    using Debug = UnityEngine.Debug;
 
     public static unsafe class TransformDebugUtils
     {
         const string DllName = "libUnityTransformChanges.dll";
 
         public delegate void TransformChangeDelegate(NativeTransform transform, NativeTransformHierarchy hierarchyID, ref bool bypass);
+        public delegate void TransformChangeAppliedInJobDelegate(TransformAccessReadonly transformAccess, ulong mask);
+        public delegate void TransformChangesApplyStartedDelegate(string? descriptor, ulong mask);
+        public delegate void TransformChangesApplyFinishedDelegate();
 
         public static event TransformChangeDelegate? TransformChange;
+        public static event TransformChangeAppliedInJobDelegate? TransformChangeAppliedInJob;
+        public static event TransformChangesApplyStartedDelegate? TransformChangesApplyStarted;
+        public static event TransformChangesApplyFinishedDelegate? TransformChangesApplyFinished;
 
 #if UNITY_2021_3_9 && UNITY_64 && (UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN)
         public static bool IsTrackingSupported => true;
@@ -28,20 +35,25 @@ namespace UnityTransformChanges
             set => SetTransformChangeCallbackEnabled(value);
         }
 
-        public static Transform GetTransformByID(int transformID) => (Transform)UnityInternalsBridge.FindObjectFromInstanceID(transformID);
+        public static Transform? GetTransformByID(int transformID) => (Transform?)UnityInternalsBridge.FindObjectFromInstanceID(transformID);
 
         static readonly NativeTransformChangeDelegate NativeTransformChangeCallback = OnTransformChange;
         static readonly TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate GetAndClearChangedAsBatchedJobsCallback = OnGetAndClearChangedAsBatchedJobs;
+        static readonly TransformJobMethodDelegate TransformJobMethodHook = TransformJobMethodHandler;
 
+        static TransformJobMethodDelegate? currentTransformJobMethod ;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate bool NativeTransformChangeDelegate(IntPtr data);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        delegate bool TransformJobMethodDelegate(IntPtr job, int mayBeIndex, TransformAccessReadonly transform, void* unknown1, uint unknown2);
+        delegate void TransformJobMethodDelegate(IntPtr job, int mayBeIndex, TransformAccessReadonly* transform, ulong* unknown1, uint unknown2);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        delegate bool TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate(void* transformChangeDispatch, ulong arg0, TransformJobMethodDelegate jobMethod, TransformAccessReadonly* transforms, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor);
+        delegate void TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate(void* transformChangeDispatch, ulong arg0, TransformJobMethodDelegate? jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        delegate void TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate(void* transformChangeDispatch, ulong arg0, TransformJobMethodDelegate jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate originalFunction);
 
         [DllImport(DllName)]
         static extern void SetTransformChangeCallbacks(NativeTransformChangeDelegate? transformChangeCallback, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate? getAndClearChangedBatchedJobs);
@@ -53,15 +65,57 @@ namespace UnityTransformChanges
             var data = (TransformChangedCallbackData*)dataPtr.ToPointer();
             var transform = data->transform;
             var hierarchy = data->hierarchy;
-            TransformChange?.Invoke(transform, hierarchy, ref bypass);
+            try
+            {
+                TransformChange?.Invoke(transform, hierarchy, ref bypass);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogException(ex);
+            }
             return bypass;
         }
 
         [AOT.MonoPInvokeCallback(typeof(TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate))]
-        static bool OnGetAndClearChangedAsBatchedJobs(void* transformChangeDispatch, ulong mask, TransformJobMethodDelegate jobMethod, TransformAccessReadonly* transforms, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor)
+        static void OnGetAndClearChangedAsBatchedJobs(void* transformChangeDispatch, ulong mask, TransformJobMethodDelegate? jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate originalFunction)
         {
-            var bypass = true;
-            return bypass;
+            if (TransformChangeAppliedInJob != null)
+            {
+                currentTransformJobMethod = jobMethod;
+                jobMethod = TransformJobMethodHook;
+            }
+
+            try
+            {
+                TransformChangesApplyStarted?.Invoke(descriptor, mask);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogException(ex);
+            }
+            originalFunction(transformChangeDispatch, mask, jobMethod, jobData, profilerMarker, descriptor);
+            try
+            {
+                TransformChangesApplyFinished?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogException(ex);
+            }
+        }
+
+        [AOT.MonoPInvokeCallback(typeof(TransformJobMethodDelegate))]
+        static void TransformJobMethodHandler(IntPtr job, int mayBeIndex, TransformAccessReadonly* transform, ulong* mask, uint unknown2)
+        {
+            currentTransformJobMethod!(job, mayBeIndex, transform, mask, unknown2);
+            try
+            {
+                TransformChangeAppliedInJob?.Invoke(*transform, *mask);
+            }
+            catch (Exception)
+            {
+                // ignored
+            }
         }
 
         static void SetTransformChangeCallbackEnabled(bool isEnabled)

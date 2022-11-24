@@ -62,10 +62,9 @@ public:
     TransformChangedCallbackData(void* transform, void* hierarchy, void* extra, TransformChangeType type) : transform(transform), hierarchy(hierarchy), extra(extra), type(type) { }
 };
 
-void Transform_set_Position_Intercept(void* transform, Vector3* position);
-
 typedef bool (*OnTransformChangeCallback)(TransformChangedCallbackData* data);
-typedef bool (*OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal)(void* transformChangeDispatch, uint64_t arg0, void (__cdecl*)(void* job, uint32_t mayBeIndex, void* transformAccessReadOnly, void* unknown1, uint32_t unknown2), void* transformAccesses, void* profilerMarker, char const* descriptor);
+typedef void (*TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal)(void* transformChangeDispatch, uint64_t arg0, void (__cdecl*)(void* job, uint32_t mayBeIndex, void* transformAccessReadOnly, uint64_t* unknown1, uint32_t unknown2), void* transformAccesses, void* profilerMarker, char const* descriptor);
+typedef void (*OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal)(void* transformChangeDispatch, uint64_t arg0, void (__cdecl*)(void* job, uint32_t mayBeIndex, void* transformAccessReadOnly, uint64_t* unknown1, uint32_t unknown2), void* transformAccesses, void* profilerMarker, char const* descriptor, TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal originalFunction);
 
 OnTransformChangeCallback onTransformChangeCallback = nullptr;
 OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback = nullptr;
@@ -178,7 +177,7 @@ PatchSequence MovR8Rsp18( { 0x4c, 0x89, 0x44, 0x24, 0x18 });
 
 struct HookInfo
 {
-    static __declspec(naked) void InterceptorHook()
+    static __declspec(naked) void InterceptorHookOld()
     {
         asm volatile(R"(
             movq        %rax, 0x08(%rsp)
@@ -204,6 +203,18 @@ struct HookInfo
             jz          1f
             jmp         *0x10(%rsp)
          1: ret)");
+    }
+
+    static __declspec(naked) void InterceptorHook()
+    {
+        asm volatile(R"(
+            movq        %rax, 0x08(%rsp)
+            movq        (%rax), %rax
+            movq        %rax, 0x10(%rsp)
+            movq        0x08(%rsp), %rax
+            addq        $0x08, %rax
+            jmp         *0x10(%rsp)
+        )");
     }
 
 public:
@@ -351,8 +362,6 @@ public:
 
 std::vector<Patch*> appliedPatches;
 
-Patch patchTransform_set_Position(PatchTarget(0xd40300, MovRbxRsp8), PatchTarget(0xb84b00, MovRbxRsp8), PatchTarget(0xB89B80, MovRbxRsp8), (void *) Transform_set_Position_Intercept);
-
 inline bool SameAddressSpace(uint64_t x, uint64_t y)
 {
     return (x & 0xfffffff000000000) == (y & 0xfffffff000000000);
@@ -362,11 +371,14 @@ void* GetTransformForHierarchy(void* transformHierarchy, size_t offset, size_t c
 {
     va_list args;
     va_start(args, candidatesCount);
-    void* transform;
-    for (auto i = 0; i < candidatesCount; ++candidatesCount)
+    void* transform = nullptr;
+    for (auto i = 0; i < candidatesCount; ++i)
     {
         void* candidate = va_arg(args, void*);
-        if (SameAddressSpace((uint64_t) candidate, (uint64_t)transformHierarchy) && *(void**)((uint64_t)candidate + offset) == transformHierarchy)
+        void* hierarchyCandidate;
+        if (SameAddressSpace((uint64_t) candidate, (uint64_t)transformHierarchy)
+            && ReadProcessMemory(GetCurrentProcess(), (void*)((uint64_t)candidate + offset), &hierarchyCandidate, sizeof(hierarchyCandidate), nullptr)
+            && hierarchyCandidate == transformHierarchy)
         {
             transform = candidate;
             break;
@@ -376,38 +388,48 @@ void* GetTransformForHierarchy(void* transformHierarchy, size_t offset, size_t c
     return transform;
 }
 
-bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(void* transformQueue, void* transformHierarchy, size_t hierarchyFieldOffset)
+#define INTERCEPTOR_HOOK_START(ret, methodName, ...) ret methodName(__VA_ARGS__) { \
+    register ret (*_rax)(__VA_ARGS__) asm("%rax"); \
+    auto originalFunction = _rax;
+
+#define INTERCEPTOR_HOOK_END() }
+
+void TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(void* transformQueue, void* transformHierarchy, size_t hierarchyFieldOffset, void (*originalFunction)(void*, void*))
 {
     register void* _rbx asm("%rbx");
+    register void* _rdx asm("%rdx");
     register void* _rdi asm("%rdi");
     register void* _r12 asm("%r12");
-    if (onTransformChangeCallback == nullptr)
-        return true;
+    if (onTransformChangeCallback != nullptr)
+    {
+        TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
+        data.transform = GetTransformForHierarchy(transformHierarchy, hierarchyFieldOffset, 4, _rbx, _rdx, _rdi, _r12);
 
-    TransformChangedCallbackData data(nullptr, transformHierarchy, nullptr, TransformChangeType::TransformChangeDispatch);
-    data.transform = GetTransformForHierarchy(transformHierarchy, hierarchyFieldOffset, 3, _rbx, _rdi, _r12);
-
-    auto bypass = onTransformChangeCallback(&data);
-    DebugBreakIfAttached();
-    return bypass;
+        auto bypass = onTransformChangeCallback(&data);
+        DebugBreakIfAttached();
+        if (bypass)
+            originalFunction(transformQueue, transformHierarchy);
+    }
 }
 
-bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept(void* transformQueue, void* transformHierarchy)
-{
-    return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x50);
-}
+INTERCEPTOR_HOOK_START(void, TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept, void* transformQueue, void* transformHierarchy)
+    TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x50, originalFunction);
+INTERCEPTOR_HOOK_END()
 
-bool TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept(void* transformQueue, void* transformHierarchy)
-{
-    return TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x78);
-}
+INTERCEPTOR_HOOK_START(void, TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept, void* transformQueue, void* transformHierarchy)
+    TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(transformQueue, transformHierarchy, 0x78, originalFunction);
+INTERCEPTOR_HOOK_END()
 
-bool TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook(void* transformChangeDispatch, uint64_t arg0, void (__cdecl* jobMethod)(void* job, uint32_t mayBeIndex, void* transformAccessReadOnly, void* unknown1, uint32_t unknown2), void* transformAccesses, void* profilerMarker, char const* descriptor)
-{
-    if (::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback == nullptr)
-        return true;
-    return ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback(transformChangeDispatch, arg0, jobMethod, transformAccesses, profilerMarker, descriptor);
-}
+INTERCEPTOR_HOOK_START(void, TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook,
+                       void *transformChangeDispatch, uint64_t arg0, void
+                       (__cdecl *jobMethod)(void *jobData, uint32_t mayBeIndex, void *transformAccessReadOnly, uint64_t *unknown1, uint32_t unknown2),
+                       void *jobData, void *profilerMarker, char const *descriptor)
+    if (::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback != nullptr)
+        ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback(transformChangeDispatch, arg0, jobMethod, jobData, profilerMarker, descriptor, originalFunction);
+    else
+        originalFunction(transformChangeDispatch, arg0, jobMethod, jobData, profilerMarker, descriptor);
+INTERCEPTOR_HOOK_END()
+
 
 Patch patchTransformChangeDispatch_QueueTransformChangeIfHasChanged(
         PatchTarget(0xD3B960, PushRdiSubRsp30, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept),
@@ -428,9 +450,9 @@ uint64_t GetModuleRVABase(const char* dllName)
 
 void ApplyPatches()
 {
-    if (patchTransformChangeDispatch_QueueTransformChangeIfHasChanged.Apply())
+    if (onTransformChangeCallback != nullptr && patchTransformChangeDispatch_QueueTransformChangeIfHasChanged.Apply())
         appliedPatches.push_back(&patchTransformChangeDispatch_QueueTransformChangeIfHasChanged);
-    if (patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal.Apply())
+    if (onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback != nullptr && patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal.Apply())
         appliedPatches.push_back(&patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal);
 }
 
@@ -544,24 +566,12 @@ void DebugTransforms()
     std::free(assembly);
 }
 
-void Transform_set_Position_Intercept(void* transform, Vector3* position)
-{
-    /*if (IsDebuggerPresent())
-        DebugBreak();*/
-    //MessageBox(nullptr, "OMG", "Test", MB_OK);
-    TransformChangedCallbackData data(transform, nullptr, position, TransformChangeType::Position);
-    if (onTransformChangeCallback != nullptr)
-        onTransformChangeCallback(&data);
-    //RollbackPatches();
-}
-
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API SetTransformChangeCallbacks(OnTransformChangeCallback onTransformChange, OnTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal onGetAndClearBatchesJob)
 {
     RollbackPatches();
     ::onTransformChangeCallback = onTransformChange;
     ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback = onGetAndClearBatchesJob;
-    if (::onTransformChangeCallback != nullptr || ::onTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_InternalCallback != nullptr)
-        ApplyPatches();
+    ApplyPatches();
 }
 
 // Unity plugin load event
