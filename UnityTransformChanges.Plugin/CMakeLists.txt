@@ -12,9 +12,17 @@ add_library(UnityTransformChanges SHARED
         PluginAPI/IUnityRenderingExtensions.h
         PluginAPI/IUnityShaderCompilerAccess.h
         framework.h
-        UnityTransformChanges.cpp
-        UnityTransformChanges.h
-        )
+        UnityTransformChanges.cpp UnityTransformChanges.h
+        UnityRuntime.cpp UnityRuntime.h
+        Writers/MemoryWriter.cpp Writers/MemoryWriter.h
+        Writers/MovToRaxWriter.cpp Writers/MovToRaxWriter.h
+        Writers/FarJumpWriter.cpp Writers/FarJumpWriter.h
+        HookInfo.cpp HookInfo.h
+        PatchSequence.cpp PatchSequence.h
+        PatchTarget.cpp PatchTarget.h
+        Patch.cpp Patch.h
+        MonoAssembly.cpp MonoAssembly.h
+        Debug.cpp Debug.h)
 
 if (APPLE)
     target_precompile_headers(UnityTransformChanges PRIVATE pch.h)

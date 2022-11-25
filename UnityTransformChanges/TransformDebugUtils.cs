@@ -15,7 +15,7 @@ namespace UnityTransformChanges
         const string DllName = "libUnityTransformChanges.dll";
 
         public delegate void TransformChangeDelegate(NativeTransform transform, NativeTransformHierarchy hierarchyID, ref bool bypass);
-        public delegate void TransformChangeAppliedInJobDelegate(TransformAccessReadonly transformAccess, ulong mask);
+        public delegate void TransformChangeAppliedInJobDelegate(ReadOnlySpan<TransformAccessReadonly> transforms, ulong mask);
         public delegate void TransformChangesApplyStartedDelegate(string? descriptor, ulong mask);
         public delegate void TransformChangesApplyFinishedDelegate();
 
@@ -47,13 +47,13 @@ namespace UnityTransformChanges
         delegate bool NativeTransformChangeDelegate(IntPtr data);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        delegate void TransformJobMethodDelegate(IntPtr job, int mayBeIndex, TransformAccessReadonly* transform, ulong* unknown1, uint unknown2);
+        delegate void TransformJobMethodDelegate(IntPtr job, int mayBeIndex, TransformAccessReadonly* transform, in ulong mask, int transformsCount);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        delegate void TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate(void* transformChangeDispatch, ulong arg0, TransformJobMethodDelegate? jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor);
+        delegate void TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate(void* transformChangeDispatch, ulong mask, TransformJobMethodDelegate? jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        delegate void TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate(void* transformChangeDispatch, ulong arg0, TransformJobMethodDelegate jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate originalFunction);
+        delegate void TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate(void* transformChangeDispatch, ulong mask, TransformJobMethodDelegate jobMethod, void* jobData, ProfilerMarker profilerMarker, [MarshalAs(UnmanagedType.LPStr)] string? descriptor, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalDelegate originalFunction);
 
         [DllImport(DllName)]
         static extern void SetTransformChangeCallbacks(NativeTransformChangeDelegate? transformChangeCallback, TransformChangeDispatchGetAndClearChangedAsBatchedJobsInternalCallbackDelegate? getAndClearChangedBatchedJobs);
@@ -105,12 +105,12 @@ namespace UnityTransformChanges
         }
 
         [AOT.MonoPInvokeCallback(typeof(TransformJobMethodDelegate))]
-        static void TransformJobMethodHandler(IntPtr job, int mayBeIndex, TransformAccessReadonly* transform, ulong* mask, uint unknown2)
+        static void TransformJobMethodHandler(IntPtr job, int mayBeIndex, TransformAccessReadonly* transforms, in ulong mask, int transformsCount)
         {
-            currentTransformJobMethod!(job, mayBeIndex, transform, mask, unknown2);
+            currentTransformJobMethod!(job, mayBeIndex, transforms, mask, transformsCount);
             try
             {
-                TransformChangeAppliedInJob?.Invoke(*transform, *mask);
+                TransformChangeAppliedInJob?.Invoke(new ReadOnlySpan<TransformAccessReadonly>(transforms, transformsCount), mask);
             }
             catch (Exception)
             {
