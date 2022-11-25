@@ -2,21 +2,29 @@
 // Created by mirasrael on 11/25/2022.
 //
 
-#include "UnityRuntime.h"
 #include "pch.h"
+#include "UnityRuntime.h"
+#include "PEHeaderParser.h"
 
 UnityRuntime CurrentUnityRuntime;
 
 UnityRuntime::UnityRuntime()
 {
-    RvaBase = GetModuleHandle("UnityPlayer.dll");
-    if (RvaBase != nullptr)
+    HMODULE module = GetModuleHandle("UnityPlayer.dll");
+    if (module != nullptr)
     {
-        Type = GetModuleHandle("mono-2.0-bdwgc.dll") != nullptr ? UnityRuntimeType::Mono : UnityRuntimeType::IL2CPP;
+        auto codeViewDebugEntry = PEHeaderParser::GetCodeViewDebugEntry(module);
+        auto pdbFileName = codeViewDebugEntry->GetPdbFileName();
+        auto il2cpp = strstr(pdbFileName, "_il2cpp_") != nullptr;
+        auto development = strstr(pdbFileName, "_development_") != nullptr;
+        Type = il2cpp
+                ? (development ? UnityRuntimeType::IL2CPPDevelopment : UnityRuntimeType::IL2CPP)
+                : (development ? UnityRuntimeType::MonoDevelopment : UnityRuntimeType::Mono);
     }
     else
     {
-        RvaBase = GetModuleHandle("Unity.exe");
+        module = GetModuleHandle("Unity.exe");
         Type = UnityRuntimeType::Editor;
     }
+    RvaBase = module;
 }

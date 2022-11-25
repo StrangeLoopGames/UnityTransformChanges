@@ -9,7 +9,9 @@ enum UnityRuntimeType
 {
     Editor,
     Mono,
-    IL2CPP
+    MonoDevelopment,
+    IL2CPP,
+    IL2CPPDevelopment
 };
 
 class UnityRuntime {

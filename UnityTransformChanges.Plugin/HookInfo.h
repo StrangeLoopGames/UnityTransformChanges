@@ -6,6 +6,13 @@
 #define UNITYTRANSFORMCHANGES_HOOKINFO_H
 
 #include "PatchSequence.h"
+#include "Writers/MovToRaxWriter.h"
+#include "Writers/FarJumpWriter.h"
+
+#define INTERCEPTOR_HOOK_START(ret, methodName, ...) ret methodName(__VA_ARGS__) { \
+    register ret (*_rax)(__VA_ARGS__) asm("%rax"); \
+    auto originalFunction = _rax;
+#define INTERCEPTOR_HOOK_END() }
 
 class HookInfo
 {

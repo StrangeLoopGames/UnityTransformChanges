@@ -22,7 +22,8 @@ add_library(UnityTransformChanges SHARED
         PatchTarget.cpp PatchTarget.h
         Patch.cpp Patch.h
         MonoAssembly.cpp MonoAssembly.h
-        Debug.cpp Debug.h)
+        Debug.cpp Debug.h
+        PEHeaderParser.cpp PEHeaderParser.h)
 
 if (APPLE)
     target_precompile_headers(UnityTransformChanges PRIVATE pch.h)

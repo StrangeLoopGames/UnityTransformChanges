@@ -4,17 +4,11 @@
 #include "pch.h"
 #include "UnityTransformChanges.h"
 
-#include <utility>
 #include <vector>
 
 #include "IUnityInterface.h"
-#include "UnityRuntime.h"
-#include "Writers/MemoryWriter.h"
-#include "Writers/MovToRaxWriter.h"
-#include "Writers/FarJumpWriter.h"
 #include "Debug.h"
 #include "PatchSequence.h"
-#include "HookInfo.h"
 #include "Patch.h"
 #include "PatchTarget.h"
 
@@ -45,6 +39,7 @@ PatchSequence MovRbxRsp8({ 0x48, 0x89, 0x5c, 0x24, 0x8  });
 PatchSequence PushRbxSubRsp20({ 0x40, 0x53, 0x48, 0x83, 0xec, 0x20 });
 PatchSequence PushRdiSubRsp30({ 0x40, 0x57, 0x48, 0x83, 0xec, 0x30 });
 PatchSequence MovR8Rsp18( { 0x4c, 0x89, 0x44, 0x24, 0x18 });
+PatchSequence MovRdxRsp10( { 0x48, 0x89, 0x54, 0x24, 0x10 });
 
 std::vector<Patch*> appliedPatches;
 
@@ -74,12 +69,6 @@ void* GetTransformForHierarchy(void* transformHierarchy, size_t offset, size_t c
     return transform;
 }
 
-#define INTERCEPTOR_HOOK_START(ret, methodName, ...) ret methodName(__VA_ARGS__) { \
-    register ret (*_rax)(__VA_ARGS__) asm("%rax"); \
-    auto originalFunction = _rax;
-
-#define INTERCEPTOR_HOOK_END() }
-
 void TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal(void* transformQueue, void* transformHierarchy, size_t hierarchyFieldOffset, void (*originalFunction)(void*, void*))
 {
     register void* _rbx asm("%rbx");
@@ -92,7 +81,6 @@ void TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept_Internal
         data.transform = GetTransformForHierarchy(transformHierarchy, hierarchyFieldOffset, 4, _rbx, _rdx, _rdi, _r12);
 
         auto bypass = onTransformChangeCallback(&data);
-        DebugBreakIfAttached();
         if (bypass)
             originalFunction(transformQueue, transformHierarchy);
     }
@@ -119,14 +107,14 @@ INTERCEPTOR_HOOK_END()
 
 Patch patchTransformChangeDispatch_QueueTransformChangeIfHasChanged(
         PatchTarget(0xD3B960, PushRdiSubRsp30, (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Editor_Intercept),
-        PatchTarget(0xB7B110, PushRbxSubRsp20),
-        PatchTarget(0xB80190, PushRbxSubRsp20),
+        PatchTarget(0x00532cc0, PushRbxSubRsp20), PatchTarget(0xB7B110, PushRbxSubRsp20),
+        PatchTarget(0x005382e0, PushRbxSubRsp20), PatchTarget(0xB80190, PushRbxSubRsp20),
         (void *) TransformChangeDispatch_QueueTransformChangeIfHasChanged_Intercept);
 
 Patch patchTransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal(
         PatchTarget(0x00d37aa0, MovR8Rsp18),
-        PatchTarget(0x0, MovR8Rsp18),
-        PatchTarget(0x0, MovR8Rsp18),
+        PatchTarget(0x005304f0, MovRdxRsp10), PatchTarget(0x0, MovRdxRsp10),
+        PatchTarget(0x00535b10, MovRdxRsp10), PatchTarget(0x00b7d3e0, MovRdxRsp10),
         (void *) TransformChangeDispatch_GetAndClearChangedAsBatchedJobs_Internal_Hook);
 
 uint64_t GetModuleRVABase(const char* dllName)

@@ -19,7 +19,7 @@ class Patch
 public:
     Patch(const PatchTarget& target, const void* defaultHook);
 
-    Patch(const PatchTarget& editor, const PatchTarget& mono, const PatchTarget& il2cpp, const void* defaultHook);
+    Patch(const PatchTarget& editor, const PatchTarget& mono, const PatchTarget& monoDevelopment, const PatchTarget& il2cpp, const PatchTarget& il2cppDevelopment, const void* defaultHook);
 
     bool Apply();
 

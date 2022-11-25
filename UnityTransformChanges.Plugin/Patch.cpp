@@ -2,11 +2,12 @@
 // Created by mirasrael on 11/25/2022.
 //
 
+#include "pch.h"
 #include "PatchSequence.h"
 #include "Writers/FarJumpWriter.h"
 #include "Writers/MemoryWriter.h"
-#include "pch.h"
 #include "Patch.h"
+#include "Debug.h"
 
 /*
  * We use that fact what functions aligned for 0x10 and gaps filled with 0xcc (int 3) op codes.
@@ -36,16 +37,19 @@ unsigned static long long int GetPatchAddress(const PatchTarget& target)
     return (unsigned long long int)CurrentUnityRuntime.RvaBase + target.Rva;
 }
 
-inline static const PatchTarget& SelectTarget(const PatchTarget& editor, const PatchTarget& mono, const PatchTarget& il2cpp)
+inline static const PatchTarget& SelectTarget(const PatchTarget& editor, const PatchTarget& mono, const PatchTarget& monoDevelopment, const PatchTarget& il2cpp, const PatchTarget& il2cppDevelopment)
 {
     switch (CurrentUnityRuntime.Type) {
-
         case Editor:
             return editor;
         case Mono:
             return mono;
+        case MonoDevelopment:
+            return monoDevelopment;
         case IL2CPP:
             return il2cpp;
+        case IL2CPPDevelopment:
+            return il2cppDevelopment;
         default:
             throw std::exception();
     }
@@ -59,6 +63,7 @@ bool Patch::Apply() {
     if (cmp != 0)
     {
         MessageBox(nullptr, "Failed to apply patch, because bytes to replace doesn't match", "Error", MB_OK);
+        DebugBreakIfAttached();
         return false;
     }
 
@@ -95,6 +100,6 @@ void Patch::Rollback() {
     target.PatchSequence.WriteProtectedTo((unsigned char *)address);
 }
 
-Patch::Patch(const PatchTarget &editor, const PatchTarget &mono, const PatchTarget &il2cpp, const void *defaultHook) : Patch(SelectTarget(editor, mono, il2cpp), defaultHook) { }
+Patch::Patch(const PatchTarget &editor, const PatchTarget& mono, const PatchTarget& monoDevelopment, const PatchTarget& il2cpp, const PatchTarget& il2cppDevelopment, const void *defaultHook) : Patch(SelectTarget(editor, mono, monoDevelopment, il2cpp, il2cppDevelopment), defaultHook) { }
 
 Patch::Patch(const PatchTarget &target, const void *defaultHook) : target(target), hookInfo(target.Hook != nullptr ? target.Hook : defaultHook), farJumpAddress(nullptr) { }
