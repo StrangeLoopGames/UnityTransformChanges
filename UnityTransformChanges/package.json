@@ -4,7 +4,11 @@
   "version": "0.1.0",
   "unity": "2021.3",
   "unityRelease": "9f1",
-  "dependencies": {
+  "dependencies": {},
+    "author": {
+    "name": "Strange Loop Games",
+    "email": "jordan@strangeloopgames.com",
+    "url": "https://github.com/StrangeLoopGames/com.strangeloopgames.unitytransformchanges"
   },
   "description": "Helps to track all transform changes in Unity",
   "keywords": [
