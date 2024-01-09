@@ -8,7 +8,7 @@
     "author": {
     "name": "Strange Loop Games",
     "email": "jordan@strangeloopgames.com",
-    "url": "https://github.com/StrangeLoopGames/com.strangeloopgames.unitytransformchanges"
+    "url": "https://github.com/StrangeLoopGames/UnityTransformChanges"
   },
   "description": "Helps to track all transform changes in Unity",
   "keywords": [
